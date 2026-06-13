@@ -11,13 +11,11 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.1",
+    "axios": "^1.4.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
+    "recharts": "^2.5.0",
     "tailwindcss": "^4.3.1"
-  },
-  "optionalDependencies": {
-    "axios": "^1.4.0",
-    "recharts": "^2.5.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

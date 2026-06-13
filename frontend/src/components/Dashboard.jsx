@@ -30,15 +30,23 @@ export default function Dashboard({ cbom }) {
     { name: "Quantum Vulnerable", value: stats.quantum_vulnerable_count || 0 },
     { name: "Classically Weak", value: stats.classically_weak_count || 0 },
     { name: "Quantum Safe", value: stats.quantum_safe_count || 0 },
+    { name: "Key Risk", value: stats.key_risk_count || 0 },
   ];
 
-  // Wikipedia themed chart colors: warning red, warning orange/yellow, success green
-  const colors = ["#d33", "#ac6600", "#148668"];
+  // Wikipedia themed chart colors
+  const colors = ["#d33", "#ac6600", "#148668", "#6b21a8"];
 
-  const barData = (stats.top_risk_files || []).map((f, i) => ({ 
+  // Build a per-file risk score by summing all component scores found in that file
+  const fileRiskMap = components.reduce((acc, c) => {
+    const fn = c.occurrences?.[0]?.filename || "";
+    acc[fn] = (acc[fn] || 0) + (c.risk_score || 0);
+    return acc;
+  }, {});
+
+  const barData = (stats.top_risk_files || []).map((f) => ({
     file: f.split("/").pop(), // display only filename for clean layout
     fullPath: f,
-    score: Math.round(components[i]?.risk_score || 0) 
+    score: Math.round(fileRiskMap[f] || 0),
   }));
 
   function downloadJson() {
@@ -52,15 +60,18 @@ export default function Dashboard({ cbom }) {
   const urgency = stats.migration_urgency || "low";
   const urgencyLabel = urgency.toUpperCase();
   
-  // Count unique algorithms that actually need migration
+  // Count unique algorithms that actually need migration (vulnerable + weak + key_risk)
   const needMigration = components.filter(
     (c) => c.classification === "quantum_vulnerable" || c.classification === "classically_weak"
   );
   const migrationCount = needMigration.length;
 
-  // Pick the highest-risk component for NIST recommendation
-  const topMigrationComp = [...needMigration].sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0))[0];
-  const nistRecommendation = topMigrationComp?.llm_analysis?.nist_standard || "N/A";
+  // Top component for NIST recommendation: prefer quantum_vulnerable, then classically_weak, then anything
+  const topMigrationComp =
+    [...needMigration].sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0))[0] ||
+    [...components].sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0))[0];
+
+  const nistRecommendation = topMigrationComp?.llm_analysis?.nist_standard || null;
   const topAlgoName = topMigrationComp?.name || "";
 
   return (
@@ -79,11 +90,13 @@ export default function Dashboard({ cbom }) {
           <div className="text-2xl text-[#d33] font-bold">⚠️</div>
           <div className="space-y-1">
             <p className="font-bold text-black">
-              This repository contains algorithms flagged for urgent post-quantum migration.
+              This repository has been flagged for urgent cryptographic review.
             </p>
             <p className="text-[#202122]">
-              The analysis shows it relies on {migrationCount} vulnerable or weak cryptographic components. 
-              Top risk is <strong>{topAlgoName || "RSA"}</strong>. A migration to <strong>{nistRecommendation || "ML-KEM"}</strong> is recommended under NIST standards.
+              {migrationCount > 0
+                ? <>The analysis shows it relies on <strong>{migrationCount}</strong> vulnerable or weak cryptographic components. Top risk is <strong>{topAlgoName}</strong>. A migration to <strong>{nistRecommendation || "a NIST PQC algorithm"}</strong> is recommended under NIST standards.</>
+                : <>The analysis detected <strong>{stats.key_risk_count || 0}</strong> potential hardcoded key/credential risk(s) in source files. Review and rotate any exposed secrets immediately.</>
+              }
             </p>
           </div>
         </div>
@@ -125,13 +138,15 @@ export default function Dashboard({ cbom }) {
                         <Cell key={`cell-${index}`} fill={colors[index % colors.length]} />
                       ))}
                     </Pie>
+                    <Tooltip formatter={(value, name) => [value, name]} />
                   </PieChart>
                 </ResponsiveContainer>
                 {/* Custom Wiki Legend */}
-                <div className="flex gap-4 text-xs font-semibold mt-3">
-                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#d33]" /> Vulnerable ({stats.quantum_vulnerable_count})</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#ac6600]" /> Weak ({stats.classically_weak_count})</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#148668]" /> Safe ({stats.quantum_safe_count})</span>
+                <div className="flex flex-wrap gap-3 text-xs font-semibold mt-3">
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#d33]" /> Vulnerable ({stats.quantum_vulnerable_count || 0})</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#ac6600]" /> Weak ({stats.classically_weak_count || 0})</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#148668]" /> Safe ({stats.quantum_safe_count || 0})</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#6b21a8]" /> Key Risk ({stats.key_risk_count || 0})</span>
                 </div>
               </div>
 
@@ -162,6 +177,8 @@ export default function Dashboard({ cbom }) {
               <button onClick={() => setFilter("quantum_vulnerable")} className={`hover:underline ${filter === "quantum_vulnerable" ? "text-black font-bold" : "text-[#3366cc]"}`}>Vulnerable ({stats.quantum_vulnerable_count || 0})</button>
               <span>|</span>
               <button onClick={() => setFilter("classically_weak")} className={`hover:underline ${filter === "classically_weak" ? "text-black font-bold" : "text-[#3366cc]"}`}>Weak ({stats.classically_weak_count || 0})</button>
+              <span>|</span>
+              <button onClick={() => setFilter("key_risk")} className={`hover:underline ${filter === "key_risk" ? "text-black font-bold" : "text-[#3366cc]"}`}>Key Risk ({stats.key_risk_count || 0})</button>
               <span>|</span>
               <button onClick={() => setFilter("ml_detected")} className={`hover:underline ${filter === "ml_detected" ? "text-black font-bold" : "text-[#3366cc]"}`}>ML Detected ({stats.ml_detected_count || 0})</button>
             </div>

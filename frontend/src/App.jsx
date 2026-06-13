@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import UploadZone from "./components/UploadZone";
 import LoadingScreen from "./components/LoadingScreen";
 import Dashboard from "./components/Dashboard";
@@ -10,8 +10,17 @@ function App() {
   const [cbom, setCbom] = useState(null);
   const [error, setError] = useState(null);
   const [searchUrl, setSearchUrl] = useState("");
+  const [showPrivacy, setShowPrivacy] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
+  const [localTime, setLocalTime] = useState(new Date());
 
   const apiBase = import.meta.env.VITE_API_URL || "";
+
+  // Live clock that updates every second
+  useEffect(() => {
+    const timer = setInterval(() => setLocalTime(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   async function handleScanRepo(url) {
     setError(null);
@@ -84,13 +93,9 @@ function App() {
           </button>
         </form>
 
-        {/* Right side controls */}
+        {/* Right side controls — intentionally minimal */}
         <div className="flex items-center gap-4 text-xs text-[#54595d]">
-          <span className="hover:underline cursor-pointer">Contributions</span>
-          <span className="hover:underline cursor-pointer">Talk</span>
-          <span className="hover:underline cursor-pointer text-[#3366cc]" onClick={() => { setPhase("upload"); setCbom(null); setError(null); }}>
-            Main Portal
-          </span>
+          <span className="hover:underline cursor-pointer text-[#3366cc]" onClick={() => setShowAbout(true)}>About</span>
         </div>
       </header>
 
@@ -158,16 +163,65 @@ function App() {
       <footer className="border-t border-[#a2a9b1] bg-[#f8f9fa] mt-12 py-8 px-6 text-xs text-[#54595d] max-w-7xl mx-auto w-full">
         <div className="flex justify-between items-start">
           <div>
-            <p className="mb-2">This page was last scanned on {new Date().toLocaleDateString()}.</p>
+            <p className="mb-2">
+              🕒 Local time: <span className="font-semibold text-[#202122]">{localTime.toLocaleString()}</span>
+            </p>
             <p className="mb-2">Text is available under the Creative Commons Attribution-ShareAlike License; additional terms may apply.</p>
           </div>
           <div className="flex gap-4">
-            <span className="hover:underline cursor-pointer">Privacy policy</span>
-            <span className="hover:underline cursor-pointer">About CryptoPulse</span>
-            <span className="hover:underline cursor-pointer">Disclaimers</span>
+            <span className="hover:underline cursor-pointer text-[#3366cc]" onClick={() => setShowPrivacy(true)}>Privacy policy</span>
+            <span className="hover:underline cursor-pointer text-[#3366cc]" onClick={() => setShowAbout(true)}>About CryptoPulse</span>
           </div>
         </div>
       </footer>
+
+      {/* ── Privacy Policy Modal ── */}
+      {showPrivacy && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40" onClick={() => setShowPrivacy(false)}>
+          <div className="bg-white border border-[#a2a9b1] rounded-sm shadow-lg w-full max-w-xl p-8 relative" onClick={(e) => e.stopPropagation()}>
+            <button onClick={() => setShowPrivacy(false)} className="absolute top-3 right-4 text-lg text-[#54595d] hover:text-black cursor-pointer">✕</button>
+            <h2 className="font-serif text-2xl text-black mb-4 border-b border-[#a2a9b1] pb-2">Privacy Policy</h2>
+            <div className="text-sm leading-relaxed text-[#202122] space-y-3">
+              <p>
+                CryptoPulse is designed with your privacy in mind. The scanner <strong>does not copy, store, or transmit your source code</strong> to any external service.
+              </p>
+              <p>
+                When you submit a repository URL or upload a ZIP archive, the tool clones or extracts the files into a temporary directory on the server, scans the code exclusively for <strong>cryptographic components and quantum-vulnerable patterns</strong>, and then <strong>immediately deletes</strong> the temporary copy once the analysis is complete.
+              </p>
+              <p>
+                The only data retained is the resulting Cryptographic Bill of Materials (CBOM) — a structured summary of the algorithms detected — which is returned to your browser and never persisted on the server.
+              </p>
+              <p>
+                No personal information, authentication tokens, or code content is collected, logged, or shared with third parties.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── About CryptoPulse Modal ── */}
+      {showAbout && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40" onClick={() => setShowAbout(false)}>
+          <div className="bg-white border border-[#a2a9b1] rounded-sm shadow-lg w-full max-w-xl p-8 relative" onClick={(e) => e.stopPropagation()}>
+            <button onClick={() => setShowAbout(false)} className="absolute top-3 right-4 text-lg text-[#54595d] hover:text-black cursor-pointer">✕</button>
+            <h2 className="font-serif text-2xl text-black mb-4 border-b border-[#a2a9b1] pb-2">About CryptoPulse</h2>
+            <div className="text-sm leading-relaxed text-[#202122] space-y-3">
+              <p>
+                <strong>CryptoPulse</strong> is an open-source Cryptographic Bill of Materials (CBOM) generator built to help developers and security teams prepare for the post-quantum era.
+              </p>
+              <p>
+                <strong>What it does:</strong> It scans your source code — via a GitHub URL or a local ZIP upload — and identifies every cryptographic algorithm, library call, and key-management pattern used in your project. Each finding is classified as <em>Quantum Vulnerable</em>, <em>Classically Weak</em>, or <em>Quantum Safe</em>, scored for risk, and enriched with NIST migration recommendations.
+              </p>
+              <p>
+                <strong>Why it was built:</strong> Quantum computers threaten to break widely-used public-key algorithms such as RSA and ECC. Organisations that rely on these algorithms need a clear inventory of where they appear so they can plan a migration to post-quantum cryptography (PQC). CryptoPulse automates that inventory — turning days of manual auditing into a single scan that takes seconds.
+              </p>
+              <p>
+                The project combines <strong>regex-based pattern detection</strong>, a <strong>machine-learning classifier</strong>, and <strong>LLM-powered enrichment</strong> (via Groq) to deliver a comprehensive, actionable CBOM aligned with NIST PQC standards.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
