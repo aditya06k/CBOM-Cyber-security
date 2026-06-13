@@ -10,6 +10,7 @@ frontend/.env
 
 # Ignore backend temporary git repos and generated temp dirs
 backend/tmp*/
+tmp*/
 
 # Ignore local test artifacts
 testcode.zip
