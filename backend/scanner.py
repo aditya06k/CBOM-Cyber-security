@@ -6,7 +6,16 @@ from typing import Any
 SKIP_DIRS = {
     "node_modules", ".git", "__pycache__", "dist", "build", "vendor",
     "tests", "test", "vectors", "docs", ".github", "website",
-    "venv", ".venv", "env", ".env", "temp"
+    "venv", ".venv", "env", ".env", "temp", "results", "output",
+    "cache", "logs", "log",
+}
+
+# Key-risk patterns only apply to these source-code extensions
+# (not JSON/YAML/text data files which legitimately contain UUIDs/hashes)
+_SOURCE_CODE_EXTS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".go", ".rs", ".rb", ".php",
+    ".cs", ".swift", ".kt", ".scala",
 }
 
 PATTERN_GROUPS: list[tuple[str, list[str]]] = [
@@ -55,10 +64,16 @@ PATTERN_GROUPS: list[tuple[str, list[str]]] = [
 ]
 
 KEY_RISK_PATTERNS: list[tuple[str, str]] = [
-    ("hex_string", r"[0-9a-fA-F]{32,}"),
+    # Only match hex strings that appear as an assigned value/string literal
+    # in source code — bare UUIDs in JSON data files are excluded by the
+    # _SOURCE_CODE_EXTS check performed at scan time.
+    (
+        "hex_string",
+        r'(?i)(?:key|secret|token|iv|nonce|salt|seed|password)\s*[=:]\s*["\']?[0-9a-fA-F]{32,}["\']?',
+    ),
     (
         "hardcoded_credential",
-        r'(?i)(key|secret|password)\s*=\s*["\'][^"\']{8,}["\']',
+        r'(?i)(key|secret|password|token)\s*=\s*["\'][^"\']{8,}["\']',
     ),
 ]
 
@@ -114,6 +129,12 @@ def _match_on_line(
     return matches
 
 
+def _file_ext(filename: str) -> str:
+    """Return the lowercased file extension including the dot."""
+    import os
+    return os.path.splitext(filename)[1].lower()
+
+
 def scan_files(file_map: dict[str, str]) -> list[dict]:
     """Scan file contents for cryptographic patterns and key-risk indicators."""
     findings: list[dict] = []
@@ -122,6 +143,8 @@ def scan_files(file_map: dict[str, str]) -> list[dict]:
         if _should_skip(filename):
             continue
 
+        ext = _file_ext(filename)
+        is_source = ext in _SOURCE_CODE_EXTS
         lines = content.splitlines()
 
         for line_index, line in enumerate(lines):
@@ -141,18 +164,21 @@ def scan_files(file_map: dict[str, str]) -> list[dict]:
                     )
                 )
 
-            for algorithm, pattern in _COMPILED_KEY_RISK:
-                findings.extend(
-                    _match_on_line(
-                        line,
-                        pattern,
-                        algorithm,
-                        "key_risk",
-                        filename,
-                        line_number,
-                        lines,
-                        line_index,
+            # Key-risk patterns (hardcoded secrets/hex keys) only apply
+            # to source code files, not to data/config/binary files.
+            if is_source:
+                for algorithm, pattern in _COMPILED_KEY_RISK:
+                    findings.extend(
+                        _match_on_line(
+                            line,
+                            pattern,
+                            algorithm,
+                            "key_risk",
+                            filename,
+                            line_number,
+                            lines,
+                            line_index,
+                        )
                     )
-                )
 
     return findings

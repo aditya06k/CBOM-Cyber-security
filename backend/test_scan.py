@@ -3,6 +3,7 @@ import sys
 import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
+"""
 End-to-end test for the CBOM scanner.
 
 Repo: https://github.com/nicowillis/crypto-examples
@@ -34,27 +35,32 @@ def print_cbom(cbom: dict, elapsed: float):
     print(f"  Files scanned   : {meta.get('files_scanned')}")
     print(f"  Total findings  : {meta.get('total_findings')}")
 
+    # FIX: guard against None before calling .upper() / :.1f
+    overall_risk = summary.get('overall_risk_score')
+    migration_urgency = summary.get('migration_urgency') or "unknown"
+
     print(f"\n--- SUMMARY ---")
     print(f"  Quantum Vulnerable : {summary.get('quantum_vulnerable_count')}")
     print(f"  Classically Weak   : {summary.get('classically_weak_count')}")
     print(f"  Quantum Safe       : {summary.get('quantum_safe_count')}")
     print(f"  ML Detected        : {summary.get('ml_detected_count')}")
-    print(f"  Overall Risk Score : {summary.get('overall_risk_score'):.1f} / 100")
-    print(f"  Migration Urgency  : {summary.get('migration_urgency').upper()}")
+    print(f"  Overall Risk Score : {overall_risk:.1f} / 100" if overall_risk is not None else "  Overall Risk Score : N/A")
+    print(f"  Migration Urgency  : {migration_urgency.upper()}")
     print(f"  Top Risk Files     :")
     for f in summary.get("top_risk_files", []):
         print(f"    - {f}")
 
     print(f"\n--- COMPONENTS ({len(components)} unique algorithms) ---")
     for c in sorted(components, key=lambda x: x.get("risk_score", 0), reverse=True):
-        occ  = len(c.get("occurrences", []))
-        llm  = c.get("llm_analysis", {})
-        name = c.get("name", "")
-        cls  = c.get("classification", "")
+        occ   = len(c.get("occurrences", []))
+        llm   = c.get("llm_analysis", {})
+        name  = c.get("name", "")
+        cls   = c.get("classification", "")
         score = c.get("risk_score", 0)
         nist  = llm.get("nist_standard", "N/A")
         urgency = llm.get("urgency", "?")
-        print(f"  [{cls:20}] {name:20} risk={score:3}  occ={occ:4}  nist={nist}  urgency={urgency}")
+        # FIX: use :.0f so float risk_score prints cleanly without extra decimals
+        print(f"  [{cls:20}] {name:20} risk={score:.0f}  occ={occ:4}  nist={nist}  urgency={urgency}")
 
     print(f"\n--- SAMPLE DETAIL (highest risk) ---")
     top = sorted(components, key=lambda x: x.get("risk_score", 0), reverse=True)
@@ -82,7 +88,6 @@ def verify_results(cbom: dict) -> bool:
     """Basic correctness assertions."""
     summary    = cbom.get("summary", {})
     components = cbom.get("components", [])
-    algo_names = {c.get("name","").upper() for c in components}
     errors = []
 
     # 1. There must be findings
@@ -120,36 +125,54 @@ def verify_results(cbom: dict) -> bool:
         return True
 
 
-# ── HEALTH CHECK ──────────────────────────────────────────────
-print("1. Health check ...")
-r = httpx.get(f"{BASE}/health", timeout=10)
-assert r.status_code == 200 and r.json().get("status") == "ok", f"Health failed: {r.text}"
-print("   OK\n")
+# FIX: wrap all script-level execution in __main__ guard so the file can be
+#      safely imported / tested without immediately firing HTTP requests.
+if __name__ == "__main__":
+    success = True
 
-# ── REPO SCAN ─────────────────────────────────────────────────
-print(f"2. Repo scan: {TEST_REPO}")
-print("   (cloning + scanning — may take up to 2 min) ...")
-start   = time.time()
-r       = httpx.post(f"{BASE}/scan/repo", json={"github_url": TEST_REPO}, timeout=300)
-elapsed = round(time.time() - start, 1)
+    # ── HEALTH CHECK ──────────────────────────────────────────────
+    print("1. Health check ...")
+    try:
+        r = httpx.get(f"{BASE}/health", timeout=10)
+        assert r.status_code == 200 and r.json().get("status") == "ok", \
+            f"Health failed: {r.text}"
+        print("   OK\n")
+    except Exception as e:
+        print(f"   HEALTH CHECK FAILED: {e}")
+        sys.exit(1)
 
-print(f"   HTTP {r.status_code}  ({elapsed}s)")
-
-if r.status_code == 200:
-    cbom = r.json()
-    print_cbom(cbom, elapsed)
-    verify_results(cbom)
-else:
-    print(f"   ERROR: {r.status_code} — {r.text[:500]}")
-    print("\n   Trying fallback repo: https://github.com/dlitz/pycrypto ...")
-    start = time.time()
-    r2    = httpx.post(f"{BASE}/scan/repo",
-                       json={"github_url": "https://github.com/dlitz/pycrypto"},
-                       timeout=300)
+    # ── REPO SCAN ─────────────────────────────────────────────────
+    print(f"2. Repo scan: {TEST_REPO}")
+    print("   (cloning + scanning — may take up to 2 min) ...")
+    start   = time.time()
+    r       = httpx.post(f"{BASE}/scan/repo", json={"github_url": TEST_REPO}, timeout=300)
     elapsed = round(time.time() - start, 1)
-    print(f"   HTTP {r2.status_code}  ({elapsed}s)")
-    if r2.status_code == 200:
-        print_cbom(r2.json(), elapsed)
-        verify_results(r2.json())
+
+    print(f"   HTTP {r.status_code}  ({elapsed}s)")
+
+    if r.status_code == 200:
+        cbom = r.json()
+        print_cbom(cbom, elapsed)
+        # FIX: use verify_results() return value to set the exit code
+        if not verify_results(cbom):
+            success = False
     else:
-        print(f"   FALLBACK ERROR: {r2.text[:300]}")
+        print(f"   ERROR: {r.status_code} — {r.text[:500]}")
+        print("\n   Trying fallback repo: https://github.com/dlitz/pycrypto ...")
+        start = time.time()
+        r2    = httpx.post(f"{BASE}/scan/repo",
+                           json={"github_url": "https://github.com/dlitz/pycrypto"},
+                           timeout=300)
+        elapsed = round(time.time() - start, 1)
+        print(f"   HTTP {r2.status_code}  ({elapsed}s)")
+        if r2.status_code == 200:
+            print_cbom(r2.json(), elapsed)
+            # FIX: use fallback verify result too
+            if not verify_results(r2.json()):
+                success = False
+        else:
+            print(f"   FALLBACK ERROR: {r2.text[:300]}")
+            success = False
+
+    # FIX: exit with non-zero code on any failure so CI pipelines can detect it
+    sys.exit(0 if success else 1)

@@ -19,14 +19,22 @@ def build_cbom(findings: list[dict[str, Any]], llm_data: dict[str, dict], meta: 
 	"""
 	now = datetime.now(timezone.utc).isoformat()
 
-	# summary counts
+	# summary counts (per-finding)
 	quantum_vulnerable_count = sum(1 for f in findings if f.get("classification") == "quantum_vulnerable")
 	classically_weak_count = sum(1 for f in findings if f.get("classification") == "classically_weak")
 	quantum_safe_count = sum(1 for f in findings if f.get("classification") == "quantum_safe")
+	key_risk_count = sum(1 for f in findings if f.get("classification") == "key_risk")
 	ml_detected_count = sum(1 for f in findings if f.get("detection_method") == "ml")
 
-	# overall risk score (mean of risk_score)
-	scores = [float(f.get("risk_score", 0)) for f in findings]
+	# overall risk score — averaged over unique *algorithms* (not raw findings)
+	# to avoid one noisy file inflating the score.
+	unique_algo_scores: dict[str, float] = {}
+	for f in findings:
+		algo = f.get("algorithm") or f.get("classification", "unknown")
+		rs = float(f.get("risk_score", 0))
+		if algo not in unique_algo_scores or rs > unique_algo_scores[algo]:
+			unique_algo_scores[algo] = rs
+	scores = list(unique_algo_scores.values())
 	overall_risk_score = float(sum(scores) / len(scores)) if scores else 0.0
 
 	if overall_risk_score > 75:
@@ -90,6 +98,7 @@ def build_cbom(findings: list[dict[str, Any]], llm_data: dict[str, dict], meta: 
 			"quantum_vulnerable_count": int(quantum_vulnerable_count),
 			"classically_weak_count": int(classically_weak_count),
 			"quantum_safe_count": int(quantum_safe_count),
+			"key_risk_count": int(key_risk_count),
 			"ml_detected_count": int(ml_detected_count),
 			"overall_risk_score": overall_risk_score,
 			"migration_urgency": migration_urgency,

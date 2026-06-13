@@ -1,16 +1,49 @@
 import os
+import sys
 import shutil
+import stat
 import tempfile
+import traceback
 import zipfile
 import asyncio
+import logging
 from typing import Dict
 
+# Ensure the backend package directory is on sys.path so that sibling modules
+# (scanner, cbom_builder, risk_scorer, llm_enricher, ml_classifier) can be
+# imported whether uvicorn is launched from the project root or from within
+# the backend/ directory itself.
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("cbom_backend")
+
+
+def _remove_readonly(func, path, _):
+    """onerror handler for shutil.rmtree — fixes Windows read-only files (e.g. .git pack files)."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def _cleanup_tmpdir(path: str):
+    """Safely remove a temporary directory, handling Windows file-locking."""
+    try:
+        shutil.rmtree(path, onerror=_remove_readonly)
+    except Exception:
+        pass
 
 app = FastAPI()
 
@@ -21,6 +54,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    logger.error("Unhandled exception on %s %s:\n%s", request.method, request.url, tb)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}", "traceback": tb},
+    )
 
 
 class RepoScanRequest(BaseModel):
@@ -61,58 +104,71 @@ def _read_supported_files(root_path: str) -> Dict[str, str]:
 async def _process_scan_dir(base_path: str) -> Dict:
     """Process a directory: scan, ML classify, score, enrich, build CBOM."""
     from scanner import scan_files
-    from ml_classifier import MODEL, classify_snippet
     from risk_scorer import score_findings
     from llm_enricher import enrich_findings
     from cbom_builder import build_cbom
 
+    # Try to load the ML classifier — gracefully degrade on MemoryError / ImportError
+    # (can happen on constrained systems when scipy/numpy fail to initialise).
+    _ml_enabled = False
+    try:
+        from ml_classifier import MODEL, classify_snippet
+        _ml_enabled = True
+    except (MemoryError, ImportError, Exception) as exc:
+        logger.warning("ML classifier unavailable, skipping ML pass: %s", exc)
+
     # 2. Read files
     file_map = await asyncio.to_thread(_read_supported_files, base_path)
+    logger.info("Read %d files from %s", len(file_map), base_path)
 
     # 3. findings from regex scanner
     findings = await asyncio.to_thread(scan_files, file_map)
+    logger.info("Regex scan produced %d findings", len(findings))
 
-    # 4. ML classify any 5-line windows not caught by regex
-    # Run entire ML pass in ONE background thread — avoids spawning thousands of
-    # threads (one per snippet) which caused CancelledError / TimeoutError on large repos.
-    MAX_ML_WINDOWS_PER_FILE = 5   # cap per file to keep runtime bounded
+    # 4. ML classify any 5-line windows not caught by regex (if ML is available)
+    if _ml_enabled:
+        MAX_ML_WINDOWS_PER_FILE = 5   # cap per file to keep runtime bounded
 
-    def _ml_pass(file_map, existing_findings):
-        existing_positions = set(
-            (f.get("filename"), f.get("line_number")) for f in existing_findings
-        )
-        ml_findings = []
-        for filename, content in file_map.items():
-            lines = content.splitlines()
-            windows_checked = 0
-            for i in range(0, max(0, len(lines) - 4)):
-                if windows_checked >= MAX_ML_WINDOWS_PER_FILE:
-                    break
-                line_number = i + 1
-                overlap = any(
-                    fn == filename and abs(ln - line_number) < 5
-                    for fn, ln in existing_positions
-                )
-                if overlap:
-                    continue
-                snippet = "\n".join(lines[i : i + 5])
-                cls = classify_snippet(MODEL, snippet)
-                windows_checked += 1
-                if cls and cls.get("classification") != "unknown":
-                    ml_findings.append(
-                        {
-                            "filename": filename,
-                            "line_number": line_number,
-                            "algorithm": cls.get("classification"),
-                            "classification": cls.get("classification"),
-                            "code_snippet": snippet,
-                            "detection_method": "ml",
-                        }
+        def _ml_pass(file_map, existing_findings):
+            existing_positions = set(
+                (f.get("filename"), f.get("line_number")) for f in existing_findings
+            )
+            ml_findings = []
+            for filename, content in file_map.items():
+                lines = content.splitlines()
+                windows_checked = 0
+                for i in range(0, max(0, len(lines) - 4)):
+                    if windows_checked >= MAX_ML_WINDOWS_PER_FILE:
+                        break
+                    line_number = i + 1
+                    overlap = any(
+                        fn == filename and abs(ln - line_number) < 5
+                        for fn, ln in existing_positions
                     )
-        return ml_findings
+                    if overlap:
+                        continue
+                    snippet = "\n".join(lines[i : i + 5])
+                    cls = classify_snippet(MODEL, snippet)
+                    windows_checked += 1
+                    if cls and cls.get("classification") != "unknown":
+                        ml_findings.append(
+                            {
+                                "filename": filename,
+                                "line_number": line_number,
+                                "algorithm": cls.get("classification"),
+                                "classification": cls.get("classification"),
+                                "code_snippet": snippet,
+                                "detection_method": "ml",
+                            }
+                        )
+            return ml_findings
 
-    ml_findings = await asyncio.to_thread(_ml_pass, file_map, findings)
-    findings.extend(ml_findings)
+        try:
+            ml_findings = await asyncio.to_thread(_ml_pass, file_map, findings)
+            findings.extend(ml_findings)
+            logger.info("ML pass added %d findings", len(ml_findings))
+        except (MemoryError, Exception) as exc:
+            logger.warning("ML pass failed, continuing without ML findings: %s", exc)
 
     # 5. score findings
     findings = await asyncio.to_thread(score_findings, findings)
@@ -122,6 +178,7 @@ async def _process_scan_dir(base_path: str) -> Dict:
 
     # 7. build cbom
     cbom = await asyncio.to_thread(build_cbom, findings, llm_data, {"files_scanned": len(file_map)})
+    logger.info("CBOM built with %d components", len(cbom.get("components", [])))
 
     return cbom
 
@@ -143,10 +200,7 @@ async def scan_upload(file: UploadFile):
 
         return cbom
     finally:
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
+        _cleanup_tmpdir(tmpdir)
 
 
 @app.post("/scan/repo")
@@ -174,10 +228,7 @@ async def scan_repo(request: RepoScanRequest):
         cbom = await asyncio.wait_for(_process_scan_dir(tmpdir), timeout=300)
         return cbom
     finally:
-        try:
-            shutil.rmtree(tmpdir)
-        except Exception:
-            pass
+        _cleanup_tmpdir(tmpdir)
 
 
 @app.get("/health")
